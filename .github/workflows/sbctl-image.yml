@@ -1,0 +1,119 @@
+name: SBCTL sing-box image
+
+on:
+  push:
+    branches: [codex/v2ray-api]
+    paths:
+      - Dockerfile.sbctl
+      - ci/sbctl/**
+      - .github/workflows/sbctl-image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sbctl-image-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/domoxiaojun/sing-box
+  UPSTREAM_COMMIT: 328a6de7976182700aaa4f7e2c134bd568b47d88
+
+jobs:
+  build:
+    if: github.repository == 'domoxiaojun/sing-box'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify unchanged upstream source
+        run: |
+          test "$(git rev-parse 'v1.12.9^{commit}')" = "$UPSTREAM_COMMIT"
+          git diff --exit-code "$UPSTREAM_COMMIT" HEAD -- . \
+            ':(exclude)Dockerfile.sbctl' \
+            ':(exclude)ci/sbctl/**' \
+            ':(exclude).github/workflows/sbctl-image.yml'
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.25.1'
+          cache: true
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build candidate
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile.sbctl
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          tags: sbctl-sing-box:test
+          build-args: BUILD_REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=sbctl-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=sbctl-${{ matrix.arch }}
+          provenance: false
+      - name: Verify protocols and real user statistics
+        env:
+          SBCTL_TEST_IMAGE: sbctl-sing-box:test
+          GOTOOLCHAIN: local
+          GOFLAGS: -mod=readonly
+        run: go test -v -count=1 -timeout=120s ./ci/sbctl
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push the tested image
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          ref="$IMAGE:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$ARCH"
+          docker tag sbctl-sing-box:test "$ref"
+          docker push "$ref"
+          {
+            printf '### linux/%s\n\n' "$ARCH"
+            docker run --rm --network none "$ref" version
+            docker run --rm --network none --entrypoint sha256sum "$ref" /usr/local/bin/sing-box
+            docker image inspect "$ref" --format '{{json .RepoDigests}}'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish verified multi-platform manifest
+        run: |
+          version="v1.12.9-v2ray-api-$GITHUB_RUN_NUMBER"
+          docker buildx imagetools create \
+            --tag "$IMAGE:$version" \
+            --tag "$IMAGE:v1.12.9-v2ray-api" \
+            "$IMAGE:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-amd64" \
+            "$IMAGE:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-arm64"
+          docker buildx imagetools inspect "$IMAGE:$version" --raw > manifest.json
+          jq -e '[.manifests[].platform | .os + "/" + .architecture] | sort == ["linux/amd64", "linux/arm64"]' manifest.json
+          {
+            printf '## Published image\n\n%s:%s\n\n' "$IMAGE" "$version"
+            docker buildx imagetools inspect "$IMAGE:$version"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,27 @@
+FROM --platform=$BUILDPLATFORM golang:1.25.1-alpine@sha256:b6ed3fd0452c0e9bcdef5597f29cc1418f61672e9d3a2f55bf02e7222c014abd AS builder
+WORKDIR /src
+COPY go.mod go.sum ./
+ENV GOTOOLCHAIN=local
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+COPY . .
+ARG TARGETOS TARGETARCH
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+    -mod=readonly -trimpath -buildvcs=false \
+    -tags 'with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_tailscale,with_v2ray_api' \
+    -ldflags '-X github.com/sagernet/sing-box/constant.Version=1.12.9 -s -w -buildid=' \
+    -o /out/sing-box ./cmd/sing-box
+
+# Retain the exact runtime used by the existing 1.12.9 pilot deployment.
+FROM ghcr.io/sagernet/sing-box@sha256:bfc7c8a0bd9534db2b946de0acee614791146cd3939b9b08fdf60d407c29ad18
+ARG BUILD_REVISION
+LABEL org.opencontainers.image.source="https://github.com/domoxiaojun/sing-box" \
+      org.opencontainers.image.version="1.12.9-v2ray-api" \
+      org.opencontainers.image.revision="${BUILD_REVISION}" \
+      org.opencontainers.image.licenses="GPL-3.0-or-later" \
+      io.sbctl.upstream.commit="328a6de7976182700aaa4f7e2c134bd568b47d88" \
+      io.sbctl.go.version="1.25.1" \
+      io.sbctl.build.tags="with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_tailscale,with_v2ray_api"
+COPY --from=builder /out/sing-box /usr/local/bin/sing-box
+COPY LICENSE /usr/share/licenses/sing-box/LICENSE
+ENTRYPOINT ["sing-box"]

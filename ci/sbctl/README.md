@@ -20,6 +20,23 @@
 
 许可证继承上游 GPL-3.0-or-later，镜像中保留 `LICENSE`。
 
+## 已发布版本
+
+2026-11-14：[构建运行 43585079972](https://github.com/domoxiaojun/sing-box/actions/runs/43585079972) 全部通过。[GHCR 镜像](https://github.com/domoxiaojun/sing-box/pkgs/container/sing-box) 已公开，可以匿名拉取。
+
+版本标签：`ghcr.io/domoxiaojun/sing-box:v1.12.9-v2ray-api-2`。固定产物：
+
+```text
+ghcr.io/domoxiaojun/sing-box@sha256:d9edd64387dfafad2eb1e15efdcf4bd904a2d0939a577107c678f3f8d033ce94
+```
+
+| 架构 | 镜像 digest |
+| --- | --- |
+| linux/amd64 | `sha256:561f8fd4c3423beaa28550e8f82b278ed868df7484bdb7bd0aab15537bf7cb90` |
+| linux/arm64 | `sha256:74b9af54d7f636d475564cacb01b04334f9ad792fd284ddd1a4747ef313c42d3` |
+
+构建提交为 `4e903e491e14888b023174ee778608f9b95c88bd`。两个架构均通过上述协议与统计检查；试点服务器也已匿名拉取并运行版本检查。实测 amd64 二进制 SHA-256 为 `620b0ae5fe80372e4e12cdb01e990fc1c056d8f07ba473d074b828c6fbe549c9`。此次未切换生产实例。
+
 ## 上游资料
 
 - [官方构建选项](https://sing-box.sagernet.org/installation/build-from-source/)

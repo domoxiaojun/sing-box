@@ -298,7 +298,7 @@ func counters(t *testing.T, connection *grpc.ClientConn, user string) [2]int64 {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	var response pb.QueryStatsResponse
-	if err := connection.Invoke(ctx, "/v2ray.core.app.stats.command.StatsService/QueryStats", &pb.QueryStatsRequest{Reset: false}, &response); err != nil {
+	if err := connection.Invoke(ctx, "/v2ray.core.app.stats.command.StatsService/QueryStats", &pb.QueryStatsRequest{Reset_: false}, &response); err != nil {
 		t.Fatal(err)
 	}
 	var values [2]int64

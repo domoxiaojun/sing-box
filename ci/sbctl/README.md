@@ -12,9 +12,10 @@
 
 - `v1.12.9-v2ray-api-<run_number>`：对应工作流运行的版本标签。
 - `v1.12.9-v2ray-api`：最近一次两架构均通过验证的别名。
+- `latest`：默认部署标签，与最近一次双架构验证通过的版本指向相同镜像。
 - `build-<run_id>-<run_attempt>-<arch>`：各架构的候选产物。
 
-工作流运行摘要记录版本、二进制 SHA-256、架构镜像 digest 和多架构 digest。部署时使用 `ghcr.io/domoxiaojun/sing-box@sha256:…`，不要将可移动标签当作已验收版本。重跑某个工作流仍可能更新该运行编号的标签；digest 才是不变的产物标识。
+工作流运行摘要记录版本、二进制 SHA-256、架构镜像 digest 和多架构 digest。默认部署使用 `ghcr.io/domoxiaojun/sing-box:latest`，并记录拉取到的实际 digest；指定版本标签与 digest 继续用于核对和回退。重跑某个工作流仍可能更新该运行编号的标签；digest 才是不变的产物标识。标签更新不会自动升级已运行的容器，也不改变 sbctl 已登记的镜像绑定。
 
 测试只使用 CI 临时生成的凭据与证书，不包含 VPS 的配置或秘密，也不部署到生产节点。统计编译标签不会自动启用统计；实际节点还需配置 `experimental.v2ray_api`、回环监听及 `stats.users`，验证用户映射和真实计数。此镜像不包含 sbctl 的宿主工具、账本或授权守卫。
 

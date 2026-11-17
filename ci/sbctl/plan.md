@@ -16,7 +16,9 @@
 用户要求 sbctl 和 sing-box 使用 latest，只改仓库并提交，不更新服务器。
 
 - [x] ✅ 1. 工作流增加 latest，与双架构验证通过的版本同时发布；保持内核源码和 with_v2ray_api 不变。
-- [ ] 2. 通过工作流与文档静态检查，提交推送并等待 CI 发布。
-- [ ] 3. 核对匿名读取 latest 的清单与架构，记录发行结果后停止。
+- [x] ✅ 2. 通过工作流与文档静态检查，提交推送并等待 CI 发布。
+- [x] ✅ 3. 核对匿名读取 latest 的清单与架构，记录发行结果后停止。
 
 编译、协议验证和 Docker 操作只在 GitHub Actions 执行；不重启或升级服务器。
+
+完成记录：提交 `ba932f6`，[运行 44116202008](https://github.com/domoxiaojun/sing-box/actions/runs/44116202008) 的两种原生架构构建、协议/统计检查及发布均成功。发布 `v1.12.9-v2ray-api-3`、`v1.12.9-v2ray-api` 和 `latest`，多架构 digest 为 `sha256:3b2101eed6f02863f4873b5992ac2ec4186c60380774bf451f4360b8dbeea1a4`。匿名读取 latest 及协议别名均成功，清单摘要和 amd64/arm64 平台核对通过；actionlint、文档离线链接与差异检查通过。未操作服务器。

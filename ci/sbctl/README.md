@@ -23,6 +23,8 @@
 
 ## 已发布版本
 
+2026-11-17：[构建运行 44116202008](https://github.com/domoxiaojun/sing-box/actions/runs/44116202008) 的两个架构和发布任务全部通过，发布 `v1.12.9-v2ray-api-3` 和 `latest`。latest 已验证可匿名读取，包含 linux/amd64、linux/arm64，当前 digest 为 `sha256:3b2101eed6f02863f4873b5992ac2ec4186c60380774bf451f4360b8dbeea1a4`。内核源码仍为官方 1.12.9，包含 with_v2ray_api；本次没有部署服务器。以下保留首次发行的历史记录。
+
 2026-11-14：[构建运行 43585079972](https://github.com/domoxiaojun/sing-box/actions/runs/43585079972) 全部通过。[GHCR 镜像](https://github.com/domoxiaojun/sing-box/pkgs/container/sing-box) 已公开，可以匿名拉取。
 
 版本标签：`ghcr.io/domoxiaojun/sing-box:v1.12.9-v2ray-api-2`。固定产物：

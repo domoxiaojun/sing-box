@@ -1,0 +1,21 @@
+FROM golang:1.26.10-alpine AS builder
+WORKDIR /src
+COPY . .
+ENV CGO_ENABLED=0 GOTOOLCHAIN=local
+RUN set -eu; \
+    tags="$(cat release/DEFAULT_BUILD_TAGS_OTHERS),with_v2ray_api"; \
+    go build -mod=readonly -buildvcs=false -trimpath -tags "$tags" \
+      -ldflags "-X github.com/sagernet/sing-box/constant.Version=1.14.4-sbctl.1 $(cat release/LDFLAGS) -s -w -buildid=" \
+      -o /out/sing-box ./cmd/sing-box
+
+FROM alpine:3.22
+# hadolint ignore=DL3018
+RUN apk add --no-cache bash tzdata ca-certificates nftables
+ARG BUILD_REVISION
+LABEL org.opencontainers.image.source="https://github.com/domoxiaojun/sing-box" \
+      org.opencontainers.image.revision="$BUILD_REVISION" \
+      org.opencontainers.image.version="1.14.4-sbctl.1" \
+      io.sbctl.stats.schema="1"
+COPY --from=builder /out/sing-box /usr/local/bin/sing-box
+COPY LICENSE /usr/share/licenses/sing-box/LICENSE
+ENTRYPOINT ["sing-box"]

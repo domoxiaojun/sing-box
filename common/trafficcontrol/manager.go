@@ -35,6 +35,7 @@ var (
 )
 
 type Manager struct {
+	OnClosed                func(*TrackerMetadata)
 	connections             compatible.Map[uuid.UUID, Tracker]
 	closedConnectionsAccess sync.Mutex
 	closedConnections       list.List[TrackerMetadata]
@@ -103,12 +104,25 @@ func (m *Manager) leave(tracker Tracker) {
 		m.closedDownloadTotal += evicted.Download.Load()
 	}
 	m.closedConnections.PushBack(metadataCopy)
+	if m.OnClosed != nil {
+		m.OnClosed(&metadataCopy)
+	}
 	m.closedConnectionsAccess.Unlock()
 	m.eventSubscriber.Emit(ConnectionEvent{
 		Type:     ConnectionEventClosed,
 		ID:       metadata.ID,
 		Metadata: &metadataCopy,
 		ClosedAt: closedAt,
+	})
+}
+
+func (m *Manager) VisitStats(begin func(), visit func(*TrackerMetadata)) {
+	m.closedConnectionsAccess.Lock()
+	defer m.closedConnectionsAccess.Unlock()
+	begin()
+	m.connections.Range(func(_ uuid.UUID, tracker Tracker) bool {
+		visit(tracker.Metadata())
+		return true
 	})
 }
 

@@ -3,6 +3,7 @@ package box
 import (
 	"context"
 	"io"
+	"os"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -15,6 +16,7 @@ import (
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/httpclient"
 	"github.com/sagernet/sing-box/common/netns"
+	"github.com/sagernet/sing-box/common/sbctlstats"
 	"github.com/sagernet/sing-box/common/taskmonitor"
 	"github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/common/trafficcontrol"
@@ -240,11 +242,17 @@ func New(options Options) (*Box, error) {
 	if err != nil {
 		return nil, E.Cause(err, "initialize router")
 	}
-	if needClashAPI || needAPIService || options.PlatformLogWriter != nil {
+	statsPath := os.Getenv("SBCTL_STATS_SOCKET")
+	if needClashAPI || needAPIService || options.PlatformLogWriter != nil || statsPath != "" {
 		trafficManager := trafficcontrol.NewManager()
 		service.MustRegisterPtr(ctx, trafficManager)
 		router.AppendTracker(trafficManager)
 		internalServices = append(internalServices, trafficManager)
+		if statsPath != "" {
+			internalServices = append(internalServices, sbctlstats.New(trafficManager, sbctlstats.Options{SocketPath: statsPath, NodeID: os.Getenv("SBCTL_NODE_ID")}))
+		}
+	}
+	if needClashAPI || needAPIService || options.PlatformLogWriter != nil {
 		var clashDefaultMode string
 		if experimentalOptions.ClashAPI != nil {
 			clashDefaultMode = experimentalOptions.ClashAPI.DefaultMode

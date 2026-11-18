@@ -1,0 +1,122 @@
+name: SBCTL sing-box image
+
+on:
+  push:
+    tags: ['v1.14.*-sbctl.*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sbctl-native-image
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/domoxiaojun/sing-box
+  UPSTREAM_COMMIT: c005f35300ce76427dc285481ec5695f5b179cd2
+
+jobs:
+  build:
+    if: github.repository == 'domoxiaojun/sing-box'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify upstream base
+        run: git merge-base --is-ancestor "$UPSTREAM_COMMIT" HEAD
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.10'
+          cache: true
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build candidate
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile.sbctl
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          tags: sbctl-sing-box:test
+          build-args: BUILD_REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=sbctl-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=sbctl-${{ matrix.arch }}
+          provenance: false
+      - name: Verify socket accounting and image runtime
+        run: |
+          go test -race ./common/sbctlstats ./common/trafficcontrol
+          work="$(mktemp -d)"
+          chmod 0777 "$work"
+          printf '%s\n' '{"outbounds":[{"type":"direct","tag":"direct"}]}' > "$work/config.json"
+          version="$(docker run --rm --network none sbctl-sing-box:test version)"
+          grep -Fx "sing-box version ${GITHUB_REF_NAME#v}" <<< "$version"
+          docker run -d --name native-stats-ci --network none --user 1000:1000 --read-only \
+            --cap-drop ALL -e SBCTL_NODE_ID=ci_node -e SBCTL_STATS_SOCKET=/stats/collector.sock \
+            -v "$work:/stats" sbctl-sing-box:test -c /stats/config.json run
+          trap 'docker logs native-stats-ci >&2; docker rm -f native-stats-ci >/dev/null' EXIT
+          for _ in {1..30}; do
+            if test -S "$work/collector.sock"; then break; fi
+            sleep 1
+          done
+          test "$(stat -c %a "$work/collector.sock")" = 660
+          sudo chown "$(id -u):$(id -g)" "$work/collector.sock"
+          SBCTL_TEST_SOCKET="$work/collector.sock" go test -count=1 -run '^TestImageSocket$' ./common/sbctlstats
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push the tested image
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          ref="$IMAGE:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$ARCH"
+          docker tag sbctl-sing-box:test "$ref"
+          docker push "$ref"
+          {
+            printf '### linux/%s\n\n' "$ARCH"
+            docker run --rm --network none "$ref" version
+            docker run --rm --network none --entrypoint sha256sum "$ref" /usr/local/bin/sing-box
+            docker image inspect "$ref" --format '{{json .RepoDigests}}'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish verified multi-platform manifest
+        run: |
+          version="$GITHUB_REF_NAME"
+          docker buildx imagetools create \
+            --tag "$IMAGE:$version" \
+            --tag "$IMAGE:latest" \
+            "$IMAGE:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-amd64" \
+            "$IMAGE:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-arm64"
+          docker buildx imagetools inspect "$IMAGE:$version" --raw > manifest.json
+          jq -e '[.manifests[].platform | .os + "/" + .architecture] | sort == ["linux/amd64", "linux/arm64"]' manifest.json
+          {
+            printf '## Published image\n\n%s:%s\n\n' "$IMAGE" "$version"
+            docker buildx imagetools inspect "$IMAGE:$version"
+          } >> "$GITHUB_STEP_SUMMARY"

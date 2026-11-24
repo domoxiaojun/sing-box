@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box"
+	"github.com/sagernet/sing-box/common/sbctlagent"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -179,6 +180,32 @@ func run() error {
 	options, err := mergeOptionsList(optionsList)
 	if err != nil {
 		return err
+	}
+	if controlURL := os.Getenv("SBCTL_CONTROL_URL"); controlURL != "" && len(configPaths) == 1 && len(configDirectories) == 0 && configPaths[0] != "stdin" {
+		err = runInUserNamespaceIfNeeded(options, optionsList)
+		if err != nil {
+			return err
+		}
+		sup, supErr := sbctlagent.NewSupervisor(sbctlagent.SupervisorConfig{
+			ControlURL:       controlURL,
+			NodeID:           os.Getenv("SBCTL_NODE_ID"),
+			AgentToken:       os.Getenv("SBCTL_AGENT_TOKEN"),
+			RegistrationCode: os.Getenv("SBCTL_REGISTRATION_CODE"),
+			StateDir:         os.Getenv("SBCTL_STATE_DIR"),
+			ConfigPath:       configPaths[0],
+			Version:          C.Version,
+			Factory: func(rawJSON []byte) (sbctlagent.BoxInstance, context.CancelFunc, error) {
+				opts, err := json.UnmarshalExtendedContext[option.Options](globalCtx, rawJSON)
+				if err != nil {
+					return nil, nil, err
+				}
+				return create(opts)
+			},
+		})
+		if supErr != nil {
+			return supErr
+		}
+		return sup.Run(globalCtx)
 	}
 	err = runInUserNamespaceIfNeeded(options, optionsList)
 	if err != nil {

@@ -57,7 +57,7 @@ jobs:
           provenance: false
       - name: Verify socket accounting and image runtime
         run: |
-          go test -race ./common/sbctlstats ./common/trafficcontrol
+          go test -race ./common/sbctlstats ./common/sbctlagent ./common/trafficcontrol
           work="$(mktemp -d)"
           chmod 0777 "$work"
           printf '%s\n' '{"outbounds":[{"type":"direct","tag":"direct"}]}' > "$work/config.json"
@@ -74,6 +74,8 @@ jobs:
           test "$(stat -c %a "$work/collector.sock")" = 660
           sudo chown "$(id -u):$(id -g)" "$work/collector.sock"
           SBCTL_TEST_SOCKET="$work/collector.sock" go test -count=1 -run '^TestImageSocket$' ./common/sbctlstats
+      - name: Verify embedded Agent with sbctl v0.12.0-rc.1
+        run: bash .github/sbctl_agent_smoke.sh
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io

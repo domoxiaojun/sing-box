@@ -243,12 +243,13 @@ func New(options Options) (*Box, error) {
 		return nil, E.Cause(err, "initialize router")
 	}
 	statsPath := os.Getenv("SBCTL_STATS_SOCKET")
-	if needClashAPI || needAPIService || options.PlatformLogWriter != nil || statsPath != "" {
+	enableSBCTL := statsPath != "" || os.Getenv("SBCTL_CONTROL_URL") != ""
+	if needClashAPI || needAPIService || options.PlatformLogWriter != nil || enableSBCTL {
 		trafficManager := trafficcontrol.NewManager()
 		service.MustRegisterPtr(ctx, trafficManager)
 		router.AppendTracker(trafficManager)
 		internalServices = append(internalServices, trafficManager)
-		if statsPath != "" {
+		if enableSBCTL {
 			internalServices = append(internalServices, sbctlstats.New(trafficManager, sbctlstats.Options{SocketPath: statsPath, NodeID: os.Getenv("SBCTL_NODE_ID")}))
 		}
 	}
@@ -695,4 +696,13 @@ func (s *Box) CloseIdleConnections() {
 
 func (s *Box) LogFactory() log.Factory {
 	return s.logFactory
+}
+
+func (s *Box) SBCTLStats() *sbctlstats.Service {
+	for _, svc := range s.internalService {
+		if st, ok := svc.(*sbctlstats.Service); ok {
+			return st
+		}
+	}
+	return nil
 }

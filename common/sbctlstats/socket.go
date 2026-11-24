@@ -1,4 +1,4 @@
-// Package sbctlstats exposes local sing-box statistics without a network listener.
+// Package sbctlstats exposes local sing-box statistics and in-process telemetry.
 package sbctlstats
 
 import (
@@ -15,12 +15,14 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/trafficcontrol"
+	M "github.com/sagernet/sing/common/metadata"
 )
 
 const (
-	SchemaVersion = 1
-	historySize   = 16384
-	maxBatch      = 128
+	SchemaVersion  = 1
+	historySize    = 16384
+	maxBatch       = 256
+	maxActiveItems = 100
 )
 
 type Options struct {
@@ -36,25 +38,43 @@ type Service struct {
 
 	mutex    sync.Mutex
 	closed   totals
-	history  []connection
+	history  []Connection
 	sequence uint64
+
+	rateMutex     sync.Mutex
+	rateAt        time.Time
+	prevTotal     pair
+	prevInbounds  map[string]pair
+	prevOutbounds map[string]pair
+	curTotalBps   pair
+	curInboundBps map[string]pair
+	curOutboundBps map[string]pair
 }
 
 func New(manager *trafficcontrol.Manager, options Options) *Service {
-	s := &Service{manager: manager, options: options, epoch: time.Now().UTC().Format(time.RFC3339Nano), closed: newTotals(), history: make([]connection, historySize)}
+	s := &Service{
+		manager: manager, options: options, epoch: time.Now().UTC().Format(time.RFC3339Nano),
+		closed: newTotals(), history: make([]Connection, historySize),
+		prevInbounds: map[string]pair{}, prevOutbounds: map[string]pair{},
+		curInboundBps: map[string]pair{}, curOutboundBps: map[string]pair{},
+	}
 	// Installed before the router starts. The callback is synchronous so bursts
 	// of short connections still contribute after the replay window fills.
 	manager.OnClosed = s.recordClose
 	return s
 }
 
-func (s *Service) Name() string { return "sbctl statistics" }
+func (s *Service) Name() string  { return "sbctl statistics" }
+func (s *Service) Epoch() string { return s.epoch }
 
 func (s *Service) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateInitialize {
 		return nil
 	}
 	path := s.options.SocketPath
+	if path == "" {
+		return nil
+	}
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSocket == 0 {
 			return errors.New("statistics socket path is occupied")
@@ -102,44 +122,49 @@ func (s *Service) accept(listener net.Listener) {
 	}
 }
 
-type request struct {
+type Request struct {
 	Action        string `json:"action"`
 	AfterSequence uint64 `json:"after_sequence,omitempty"`
 	RuntimeEpoch  string `json:"runtime_epoch,omitempty"`
 	Limit         int    `json:"limit,omitempty"`
 }
 
-type response struct {
+type Response struct {
 	SchemaVersion        int             `json:"schema_version"`
 	NodeID               string          `json:"node_id"`
 	RuntimeEpoch         string          `json:"runtime_epoch"`
 	Sequence             uint64          `json:"sequence"`
 	SampledAt            string          `json:"sampled_at"`
 	Capabilities         map[string]bool `json:"capabilities,omitempty"`
-	Counters             *counters       `json:"counters,omitempty"`
-	Inbounds             []counterItem   `json:"inbounds,omitempty"`
-	Outbounds            []counterItem   `json:"outbounds,omitempty"`
-	LocalUsers           []counterItem   `json:"local_users,omitempty"`
-	Connections          []connection    `json:"connections,omitempty"`
+	Counters             *Counters       `json:"counters,omitempty"`
+	Inbounds             []CounterItem   `json:"inbounds,omitempty"`
+	Outbounds            []CounterItem   `json:"outbounds,omitempty"`
+	LocalUsers           []CounterItem   `json:"local_users,omitempty"`
+	ActiveConnections    []Connection    `json:"active_connections_list,omitempty"`
+	Connections          []Connection    `json:"connections,omitempty"`
 	ConnectionSequence   uint64          `json:"connection_sequence"`
 	ConnectionsTruncated bool            `json:"connections_truncated,omitempty"`
 	More                 bool            `json:"more,omitempty"`
 	Error                string          `json:"error,omitempty"`
 }
 
-type counters struct {
+type Counters struct {
 	UploadBytes       int64 `json:"upload_bytes"`
 	DownloadBytes     int64 `json:"download_bytes"`
+	UploadBps         int64 `json:"upload_bps"`
+	DownloadBps       int64 `json:"download_bps"`
 	ActiveConnections int   `json:"active_connections"`
 }
 
-type counterItem struct {
+type CounterItem struct {
 	Tag           string `json:"tag"`
 	UploadBytes   int64  `json:"upload_bytes"`
 	DownloadBytes int64  `json:"download_bytes"`
+	UploadBps     int64  `json:"upload_bps,omitempty"`
+	DownloadBps   int64  `json:"download_bps,omitempty"`
 }
 
-type connection struct {
+type Connection struct {
 	Sequence      uint64   `json:"sequence"`
 	ID            string   `json:"id"`
 	Inbound       string   `json:"inbound,omitempty"`
@@ -147,6 +172,7 @@ type connection struct {
 	Network       string   `json:"network,omitempty"`
 	Domain        string   `json:"domain,omitempty"`
 	Destination   string   `json:"destination,omitempty"`
+	Source        string   `json:"source,omitempty"`
 	Outbound      string   `json:"outbound,omitempty"`
 	OutboundType  string   `json:"outbound_type,omitempty"`
 	Chain         []string `json:"chain,omitempty"`
@@ -157,19 +183,18 @@ type connection struct {
 	ClosedAt      string   `json:"closed_at"`
 }
 
-func (s *Service) serve(conn net.Conn) {
-	defer conn.Close()
-	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		return
-	}
-	var req request
-	if json.NewDecoder(io.LimitReader(conn, 1024)).Decode(&req) != nil {
-		return
-	}
-	result := response{SchemaVersion: SchemaVersion, NodeID: s.options.NodeID, RuntimeEpoch: s.epoch, Sequence: s.reads.Add(1)}
+type (
+	request    = Request
+	response   = Response
+	counters   = Counters
+	connection = Connection
+)
+
+func (s *Service) Query(req Request) Response {
+	result := Response{SchemaVersion: SchemaVersion, NodeID: s.options.NodeID, RuntimeEpoch: s.epoch, Sequence: s.reads.Add(1)}
 	switch req.Action {
 	case "capabilities":
-		result.Capabilities = map[string]bool{"counters": true, "connections": true, "domains": true, "rules": true, "outbounds": true}
+		result.Capabilities = map[string]bool{"counters": true, "connections": true, "active_connections": true, "rates": true, "domains": true, "rules": true, "outbounds": true}
 	case "counters", "snapshot", "connections":
 		if req.Action != "connections" {
 			s.readCounters(&result)
@@ -181,26 +206,145 @@ func (s *Service) serve(conn net.Conn) {
 		result.Error = "unsupported action"
 	}
 	result.SampledAt = time.Now().UTC().Format(time.RFC3339Nano)
-	_ = json.NewEncoder(conn).Encode(result)
+	return result
 }
 
-func (s *Service) readCounters(r *response) {
-	// VisitActive serializes with OnClosed. Initialize the closed totals under
-	// that same lock, even when no active connection remains.
+func (s *Service) serve(conn net.Conn) {
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return
+	}
+	var req Request
+	if json.NewDecoder(io.LimitReader(conn, 1024)).Decode(&req) != nil {
+		return
+	}
+	_ = json.NewEncoder(conn).Encode(s.Query(req))
+}
+
+func addrString(addr M.Socksaddr) string {
+	if !addr.IsValid() {
+		return ""
+	}
+	return addr.String()
+}
+
+func buildConnection(item *trafficcontrol.TrackerMetadata, up, down int64, closed bool) Connection {
+	c := Connection{
+		ID: item.ID.String(), Inbound: item.Metadata.Inbound, InboundType: item.Metadata.InboundType,
+		Network: item.Metadata.Network, Domain: item.Metadata.Domain, Destination: addrString(item.Metadata.Destination),
+		Source: addrString(item.Metadata.Source), Outbound: item.Outbound, OutboundType: item.OutboundType,
+		Chain: append([]string(nil), item.Chain[:min(16, len(item.Chain))]...), UploadBytes: up, DownloadBytes: down,
+		StartedAt: item.CreatedAt.UTC().Format(time.RFC3339Nano),
+	}
+	if closed && !item.ClosedAt.IsZero() {
+		c.ClosedAt = item.ClosedAt.UTC().Format(time.RFC3339Nano)
+	}
+	if item.Rule != nil {
+		rule := item.Rule.String()
+		c.Rule = strings.ToValidUTF8(rule[:min(512, len(rule))], "")
+	}
+	return c
+}
+
+func (s *Service) readCounters(r *Response) {
 	all := newTotals()
+	var active []Connection
 	s.manager.VisitStats(func() {
 		s.mutex.Lock()
 		all.copyFrom(s.closed)
 		s.mutex.Unlock()
 	}, func(item *trafficcontrol.TrackerMetadata) {
-		all.count(item, item.Upload.Load(), item.Download.Load())
+		up, down := item.Upload.Load(), item.Download.Load()
+		all.count(item, up, down)
 		all.total.ActiveConnections++
+		active = append(active, buildConnection(item, up, down, false))
 	})
+	nowTime := time.Now()
+	totalBps, inBps, outBps := s.sampleRates(nowTime, pair{all.total.UploadBytes, all.total.DownloadBytes}, all.inbounds, all.outbounds)
+	all.total.UploadBps = totalBps.up
+	all.total.DownloadBps = totalBps.down
 	r.Counters = &all.total
-	r.Inbounds, r.Outbounds, r.LocalUsers = counterItems(all.inbounds), counterItems(all.outbounds), counterItems(all.users)
+	r.Inbounds = counterItems(all.inbounds, inBps)
+	r.Outbounds = counterItems(all.outbounds, outBps)
+	r.LocalUsers = counterItems(all.users, nil)
+	if len(active) > 0 {
+		sort.Slice(active, func(i, j int) bool {
+			ti := active[i].UploadBytes + active[i].DownloadBytes
+			tj := active[j].UploadBytes + active[j].DownloadBytes
+			if ti != tj {
+				return ti > tj
+			}
+			return active[i].StartedAt > active[j].StartedAt
+		})
+		if len(active) > maxActiveItems {
+			active = active[:maxActiveItems]
+		}
+		r.ActiveConnections = active
+	}
 }
 
-func (s *Service) readConnections(req request, r *response) {
+func computeBps(cur, prev pair, elapsed time.Duration) pair {
+	if elapsed <= 0 {
+		return pair{}
+	}
+	ns := elapsed.Nanoseconds()
+	var out pair
+	if cur.up > prev.up {
+		out.up = (cur.up - prev.up) * 1_000_000_000 / ns
+	}
+	if cur.down > prev.down {
+		out.down = (cur.down - prev.down) * 1_000_000_000 / ns
+	}
+	return out
+}
+
+func (s *Service) sampleRates(at time.Time, total pair, inbounds, outbounds map[string]pair) (pair, map[string]pair, map[string]pair) {
+	s.rateMutex.Lock()
+	defer s.rateMutex.Unlock()
+	if s.rateAt.IsZero() {
+		s.rateAt = at
+		s.prevTotal = total
+		s.prevInbounds = clonePairs(inbounds)
+		s.prevOutbounds = clonePairs(outbounds)
+		return pair{}, nil, nil
+	}
+	elapsed := at.Sub(s.rateAt)
+	if elapsed >= 200*time.Millisecond {
+		s.curTotalBps = computeBps(total, s.prevTotal, elapsed)
+		inRates := make(map[string]pair, len(inbounds))
+		for k, v := range inbounds {
+			if prev, ok := s.prevInbounds[k]; ok {
+				inRates[k] = computeBps(v, prev, elapsed)
+			}
+		}
+		outRates := make(map[string]pair, len(outbounds))
+		for k, v := range outbounds {
+			if prev, ok := s.prevOutbounds[k]; ok {
+				outRates[k] = computeBps(v, prev, elapsed)
+			}
+		}
+		s.curInboundBps = inRates
+		s.curOutboundBps = outRates
+		s.rateAt = at
+		s.prevTotal = total
+		s.prevInbounds = clonePairs(inbounds)
+		s.prevOutbounds = clonePairs(outbounds)
+	}
+	return s.curTotalBps, clonePairs(s.curInboundBps), clonePairs(s.curOutboundBps)
+}
+
+func clonePairs(src map[string]pair) map[string]pair {
+	if len(src) == 0 {
+		return map[string]pair{}
+	}
+	dst := make(map[string]pair, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func (s *Service) readConnections(req Request, r *Response) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	after := req.AfterSequence
@@ -229,17 +373,7 @@ func (s *Service) readConnections(req request, r *response) {
 
 func (s *Service) recordClose(item *trafficcontrol.TrackerMetadata) {
 	up, down := item.Upload.Load(), item.Download.Load()
-	c := connection{
-		ID: item.ID.String(), Inbound: item.Metadata.Inbound, InboundType: item.Metadata.InboundType,
-		Network: item.Metadata.Network, Domain: item.Metadata.Domain, Destination: item.Metadata.Destination.String(),
-		Outbound: item.Outbound, OutboundType: item.OutboundType,
-		Chain: append([]string(nil), item.Chain[:min(16, len(item.Chain))]...), UploadBytes: up, DownloadBytes: down,
-		StartedAt: item.CreatedAt.UTC().Format(time.RFC3339Nano), ClosedAt: item.ClosedAt.UTC().Format(time.RFC3339Nano),
-	}
-	if item.Rule != nil {
-		rule := item.Rule.String()
-		c.Rule = strings.ToValidUTF8(rule[:min(512, len(rule))], "")
-	}
+	c := buildConnection(item, up, down, true)
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	s.closed.count(item, up, down)
@@ -251,7 +385,7 @@ func (s *Service) recordClose(item *trafficcontrol.TrackerMetadata) {
 type pair struct{ up, down int64 }
 
 type totals struct {
-	total                      counters
+	total                      Counters
 	inbounds, outbounds, users map[string]pair
 }
 
@@ -288,10 +422,15 @@ func (t *totals) count(item *trafficcontrol.TrackerMetadata, up, down int64) {
 	}
 }
 
-func counterItems(values map[string]pair) []counterItem {
-	result := make([]counterItem, 0, len(values))
+func counterItems(values map[string]pair, rates map[string]pair) []CounterItem {
+	result := make([]CounterItem, 0, len(values))
 	for tag, value := range values {
-		result = append(result, counterItem{tag, value.up, value.down})
+		item := CounterItem{Tag: tag, UploadBytes: value.up, DownloadBytes: value.down}
+		if r, ok := rates[tag]; ok {
+			item.UploadBps = r.up
+			item.DownloadBps = r.down
+		}
+		result = append(result, item)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Tag < result[j].Tag })
 	return result

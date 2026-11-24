@@ -28,6 +28,8 @@ func RegisterInbound(registry *inbound.Registry) {
 	inbound.Register[option.AnyTLSInboundOptions](registry, C.TypeAnyTLS, NewInbound)
 }
 
+var _ adapter.ManagedAnyTLSInbound = (*Inbound)(nil)
+
 type Inbound struct {
 	inbound.Adapter
 	tlsConfig tls.ServerConfig
@@ -77,6 +79,13 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		ConnectionHandler: inbound,
 	})
 	return inbound, nil
+}
+
+func (h *Inbound) UpdateSBCTLUsers(users []option.AnyTLSUser) error {
+	h.service.UpdateUsers(common.Map(users, func(it option.AnyTLSUser) anytls.User {
+		return anytls.User(it)
+	}))
+	return nil
 }
 
 func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {

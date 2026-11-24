@@ -13,6 +13,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/trafficcontrol"
 	"github.com/sagernet/sing-box/log"
+	M "github.com/sagernet/sing/common/metadata"
 )
 
 type testOutbound struct{ adapter.Outbound }
@@ -41,7 +42,7 @@ func TestSocketLifecycleAndReplay(t *testing.T) {
 		client, server := net.Pipe()
 		outbound := testOutbound{}
 		tracked := manager.RoutedConnection(context.Background(), server, adapter.InboundContext{
-			Inbound: "test-in", User: "local", OutboundChain: []adapter.Outbound{outbound},
+			Inbound: "test-in", User: "local", Source: M.ParseSocksaddr("198.51.100.7:54321"), Destination: M.ParseSocksaddr("example.com:443"), OutboundChain: []adapter.Outbound{outbound},
 		}, nil, outbound)
 		done := make(chan error, 1)
 		go func() { _, err := client.Write([]byte("data")); done <- err }()
@@ -58,12 +59,59 @@ func TestSocketLifecycleAndReplay(t *testing.T) {
 	if r.NodeID != "node_test" || r.Counters.UploadBytes != 16 || len(r.LocalUsers) != 1 || r.LocalUsers[0].UploadBytes != 16 {
 		t.Fatalf("missing fast-closed traffic: %+v", r)
 	}
-	if !r.ConnectionsTruncated || !r.More || r.ConnectionSequence != 2 || len(r.Connections) != 1 || r.Connections[0].ClosedAt == "" {
+	if !r.ConnectionsTruncated || !r.More || r.ConnectionSequence != 2 || len(r.Connections) != 1 || r.Connections[0].ClosedAt == "" || r.Connections[0].Source != "198.51.100.7:54321" {
 		t.Fatalf("unexpected first page: %+v", r)
 	}
 	next := query(t, path, request{Action: "connections", RuntimeEpoch: r.RuntimeEpoch, AfterSequence: r.ConnectionSequence})
 	if next.ConnectionsTruncated || next.More || next.ConnectionSequence != 4 || len(next.Connections) != 2 || next.Connections[0].Sequence != 3 {
 		t.Fatalf("unexpected replay: %+v", next)
+	}
+}
+
+func TestInProcessActiveConnectionsAndRates(t *testing.T) {
+	manager := trafficcontrol.NewManager()
+	s := New(manager, Options{NodeID: "node_mem"})
+	scope := adapter.NewScope(context.Background(), log.NewNOPFactory().Logger())
+	defer scope.Close()
+	for _, svc := range []adapter.LifecycleService{manager, s} {
+		if err := scope.Start(svc.Name(), svc, adapter.StartStateInitialize); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Baseline rate sample
+	_ = s.Query(Request{Action: "counters"})
+
+	client, server := net.Pipe()
+	defer client.Close()
+	outbound := testOutbound{}
+	tracked := manager.RoutedConnection(context.Background(), server, adapter.InboundContext{
+		Inbound: "anytls-in", InboundType: "anytls", Network: "tcp", Domain: "video.example.com",
+		Source: M.ParseSocksaddr("100.64.0.8:41000"), Destination: M.ParseSocksaddr("93.184.216.34:443"),
+		OutboundChain: []adapter.Outbound{outbound},
+	}, nil, outbound)
+	defer tracked.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.Write(make([]byte, 2048))
+		done <- err
+	}()
+	buf := make([]byte, 2048)
+	if _, err := tracked.Read(buf); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(220 * time.Millisecond)
+	snap := s.Query(Request{Action: "counters"})
+	if snap.Counters == nil || snap.Counters.ActiveConnections != 1 || snap.Counters.UploadBps <= 0 {
+		t.Fatalf("expected active connection and positive upload rate, got %+v", snap.Counters)
+	}
+	if len(snap.ActiveConnections) != 1 || snap.ActiveConnections[0].Domain != "video.example.com" || snap.ActiveConnections[0].ClosedAt != "" {
+		t.Fatalf("unexpected active connection list: %+v", snap.ActiveConnections)
 	}
 }
 

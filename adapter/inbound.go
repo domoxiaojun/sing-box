@@ -22,6 +22,16 @@ type Inbound interface {
 	Tag() string
 }
 
+type ManagedAnyTLSInbound interface {
+	Inbound
+	UpdateSBCTLUsers(users []option.AnyTLSUser) error
+}
+
+type ManagedTUICInbound interface {
+	Inbound
+	UpdateSBCTLUsers(users []option.TUICUser) error
+}
+
 type TCPInjectableInbound interface {
 	Inbound
 	ConnectionHandler
